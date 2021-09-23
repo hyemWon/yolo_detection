@@ -1,0 +1,6 @@
+classes= 1
+train  = custom/train2.txt
+valid  = custom/train2.txt
+names = custom/obj.names
+backup = backup/
+
