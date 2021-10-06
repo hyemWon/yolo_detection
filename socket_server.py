@@ -6,44 +6,6 @@ import time
 from collections import deque
 import yolo
 
-from flask import Flask, Response, render_template
-
-disp_frame = dict()
-app = Flask(__name__)
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-    # return Response(getFrames('1'), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-# @app.route('/cctv')
-# def cctv():
-#     return Response(getFrames('1'), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-# @app.route('/webcam')
-# def webcam():
-#     return Response(getFrames('0'), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-@app.route('/stream/<int:video_id>')
-def videoParser(video_id):
-    print(type(video_id), video_id)
-    return Response(getFrames(video_id), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-
-def getFrames(name):
-    global disp_frame
-    print(type(name))
-    while True:
-        if disp_frame[name] is not None:
-            # disp_frame -> jpeg 인코딩 (품질 100)
-            ret, jpeg = cv2.imencode('.jpg', disp_frame[name], [int(cv2.IMWRITE_JPEG_QUALITY), 100])
-            bframe = jpeg.tobytes()
-            yield (b'--frame\r\n'
-                b'Content-Type: image/jpeg\r\n\r\n' + bframe + b'\r\n\r\n')
-        else:
-            yield (b'--frame\r\n'
-                b'Content-Type: image/jpeg\r\n\r\n\r\n\r\n')
-
 
 
 
@@ -54,6 +16,7 @@ class TCPServer(threading.Thread):
 
         self.address = (ip, port)
         self.sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) #
         self.sock.bind(self.address)
         self.sock.listen()
 
@@ -74,20 +37,16 @@ class ThreadReceive(threading.Thread):
         threading.Thread.__init__(self)
         self.conn = conn
         self.addr = addr
-        self.name = None
         self.connected = True
 
         self.frame = None
         self.frame_cnt = 0
         self.results = []
+        self.roi = None
 
         print(self.addr, ' 영상 수신 대기')
 
     def run(self):
-        self.name = len(server.thread_list)
-        print('이름: ', self.name)
-        print('타입: ', type(self.name))
-
         while self.connected:
             try:
                 length = self.recvall(16)
@@ -96,7 +55,7 @@ class ThreadReceive(threading.Thread):
 
                 self.frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
                 self.frame_cnt += 1
-                
+
                 if (self.frame_cnt % 3 == 0) and (len(th_detector.deque) < 50):
                     th_detector.deque.append([self, self.frame])
 
@@ -104,13 +63,10 @@ class ThreadReceive(threading.Thread):
                 self.connected = False
 
         cv2.destroyAllWindows()
+
         server.thread_list.remove(self)
         print('삭제')
 
-        # 객체 이름 업데이트
-        for idx in range(len(server.thread_list)):
-            server.thread_list[idx].name -= 1
-        print(server.thread_list)
 
 
     # 수신 버퍼를 읽어서 반환
@@ -122,14 +78,15 @@ class ThreadReceive(threading.Thread):
             buf += newbuf
             count -= len(newbuf)
         return buf
-    
+
+
 
 # 영상 검출
 class ThreadDetect(threading.Thread):
     def __init__(self):
         threading.Thread.__init__(self)
         self.deque = deque()
-    
+
     def run(self):
         while True:
             if len(self.deque) > 0:
@@ -138,7 +95,8 @@ class ThreadDetect(threading.Thread):
                 th_read.results = results
 
             time.sleep(0.0001)
-        
+
+
 
 # 영상 송출
 class ThreadSend(threading.Thread):
@@ -149,7 +107,6 @@ class ThreadSend(threading.Thread):
         global pts
         global mask
         global roi_start
-        global disp_frame
 
         fps = 0
         count = 0
@@ -159,7 +116,8 @@ class ThreadSend(threading.Thread):
             for th_read in server.thread_list:
                 if th_read.frame is not None:
                     frame = th_read.frame.copy()
-                    
+                    name = th_read.addr
+
                     # 사람 박스 그리기
                     for detection in th_read.results:
                         label = detection[0]
@@ -175,32 +133,31 @@ class ThreadSend(threading.Thread):
 
 
                     # ROI 영역
-                    if th_read.name in pts:
+                    if name in pts:
                         pass
                     else:
-                        pts[th_read.name] = []
-                        roi_start[th_read.name] = False
+                        pts[name] = []
+                        roi_start[name] = False
 
-                    if len(pts[th_read.name]) > 0:
-                        cv2.circle(frame, pts[th_read.name][-1], 3, (0, 0, 0), -1)
-                    if len(pts[th_read.name]) > 1:
-                        for i in range(len(pts[th_read.name]) - 1):
-                            cv2.circle(frame, pts[th_read.name][i], 3, (0, 0, 0), -1)
-                            cv2.line(frame, pts[th_read.name][i], pts[th_read.name][i + 1], (0, 0, 0), 2)
+                    if len(pts[name]) > 0:
+                        cv2.circle(frame, pts[name][-1], 3, (0, 0, 0), -1)
+                    if len(pts[name]) > 1:
+                        for i in range(len(pts[name]) - 1):
+                            cv2.circle(frame, pts[name][i], 3, (0, 0, 0), -1)
+                            cv2.line(frame, pts[name][i], pts[name][i + 1], (0, 0, 0), 2)
 
 
                     cv2.putText(frame, str(fps), (15, 25), cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 0, 0), 2)
-                    cv2.imshow(str(th_read.addr), frame)
-                    cv2.setMouseCallback(str(th_read.addr), draw_roi, th_read)
+                    cv2.imshow(str(name), frame)
+                    cv2.setMouseCallback(str(name), draw_roi, th_read)
 
 
-                    if roi_start[th_read.name]:
-                        disp_frame[th_read.name] = cv2.bitwise_and(frame, mask[th_read.name])
+                    if roi_start[name]:
+                        th_read.roi = cv2.bitwise_and(frame, mask[name])
                     else:
-                        disp_frame[th_read.name] = frame
+                        th_read.roi = frame
 
-                    # cv2.imshow('roi_' + str(th_read.name), disp_frame[th_read.name])
-
+                    cv2.imshow('roi_' + str(name), th_read.roi)
 
                     count += 1
 
@@ -229,33 +186,34 @@ def draw_roi(event, x, y, flags, param):
 
     # 왼쪽 마우스 클릭
     if event == cv2.EVENT_LBUTTONDOWN:
-        pts[param.name].append((x,y))
-        print(pts)
+        pts[param.addr].append((x,y))
     # 오른쪽 마우스 클릭
     if event == cv2.EVENT_RBUTTONDOWN:
-        pts[param.name].pop()
+        pts[param.addr].pop()
     # 중간 마우스 클릭
     if event == cv2.EVENT_MBUTTONDOWN:
-        if (not roi_start[param.name]) and len(pts[param.name]) > 2:
-            roi_start[param.name] = True
-            mask[param.name] = np.zeros(param.frame.shape, np.uint8)
-            points = np.array(pts[param.name], np.int32)
-            mask[param.name] = cv2.fillPoly(mask[param.name], [points], (255,255,255))
-            # print(mask[param.name])
+        if (not roi_start[param.addr]) and len(pts[param.addr]) > 2:
+            roi_start[param.addr] = True
+            mask[param.addr] = np.zeros(param.frame.shape, np.uint8)
+            points = np.array(pts[param.addr], np.int32)
+            mask[param.addr] = cv2.fillPoly(mask[param.addr], [points], (255,255,255))
         # ROI 해제
         else:
-            roi_start[param.name] = False
-            pts[param.name].clear()
+            roi_start[param.addr] = False
+            pts[param.addr].clear()
+
+
+
 
 
 
 
 
 if __name__ == "__main__":
+    disp_frame = dict()
     pts = dict()
     mask = dict()
     roi_start = dict()
-
 
     SERVER = "192.168.0.69"
     PORT = 5050
@@ -272,4 +230,5 @@ if __name__ == "__main__":
     th_view = ThreadSend()
     th_view.start()
 
-    app.run(host='0.0.0.0', debug=False, port=5000)
+
+
